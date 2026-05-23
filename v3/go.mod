@@ -15,7 +15,7 @@ require (
 	github.com/charmbracelet/huh v0.8.0
 	github.com/coder/websocket v1.8.14
 	github.com/ebitengine/purego v0.9.1
-	github.com/go-git/go-git/v5 v5.19.0
+	github.com/go-git/go-git/v5 v5.19.1
 	github.com/go-json-experiment/json v0.0.0-20251027170946-4849db3c2f7e
 	github.com/go-ole/go-ole v1.3.0
 	github.com/godbus/dbus/v5 v5.2.2
@@ -158,7 +158,7 @@ require (
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/exp/typeparams v0.0.0-20260112195511-716be5621a96
 	golang.org/x/image v0.40.0
-	golang.org/x/mod v0.35.0 // indirect
+	golang.org/x/mod v0.35.0
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
