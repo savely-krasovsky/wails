@@ -21,7 +21,7 @@ type DevOptions struct {
 }
 
 func Dev(options *DevOptions) error {
-	host := "localhost"
+	host := "127.0.0.1"
 
 	// flag takes precedence over environment variable
 	var port int
