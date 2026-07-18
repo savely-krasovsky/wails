@@ -19,15 +19,6 @@ typedef NS_ENUM(NSInteger, MacLiquidGlassStyle) {
     LiquidGlassStyleVibrant = 3
 };
 
-static BOOL wailsUsesSmoothWindowZoom(void) {
-    // macOS 26 presents a cached window surface while zoom: blocks the main
-    // run loop. Driving the frame ourselves keeps WKWebView resizing live.
-    if (@available(macOS 26.0, *)) {
-        return YES;
-    }
-    return NO;
-}
-
 static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     const CGFloat tolerance = 0.5;
     return ABS(first.origin.x - second.origin.x) < tolerance &&
@@ -253,10 +244,6 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     [super dealloc];
 }
 - (void)zoom:(id)sender {
-    if (!wailsUsesSmoothWindowZoom()) {
-        [super zoom:sender];
-        return;
-    }
     if (self.wailsZoomAnimationTimer != nil) {
         return;
     }
@@ -269,10 +256,7 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     [super zoom:sender];
 }
 - (BOOL)isZoomed {
-    if (wailsUsesSmoothWindowZoom()) {
-        return self.wailsZoomed;
-    }
-    return [super isZoomed];
+    return self.wailsZoomed;
 }
 - (void)wailsAnimateZoomToFrame:(NSRect)targetFrame zoomed:(BOOL)zoomed {
     if (self.wailsZoomAnimationTimer != nil) {
@@ -335,7 +319,7 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     }
 }
 - (void)wailsFrameDidChange {
-    if (!wailsUsesSmoothWindowZoom() || self.wailsZoomAnimationTimer != nil || !self.wailsZoomed) {
+    if (self.wailsZoomAnimationTimer != nil || !self.wailsZoomed) {
         return;
     }
     if (!wailsFramesAreEqual(self.frame, self.wailsZoomedFrame)) {
@@ -886,7 +870,7 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     return newFrame;
 }
 - (BOOL)windowShouldZoom:(NSWindow *)window toFrame:(NSRect)newFrame {
-    if (wailsUsesSmoothWindowZoom() && [window isKindOfClass:[WebviewWindow class]]) {
+    if ([window isKindOfClass:[WebviewWindow class]]) {
         [(WebviewWindow *)window wailsAnimateZoomToFrame:newFrame zoomed:YES];
         return NO;
     }
