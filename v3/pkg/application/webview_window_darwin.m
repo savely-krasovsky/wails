@@ -18,6 +18,41 @@ typedef NS_ENUM(NSInteger, MacLiquidGlassStyle) {
     LiquidGlassStyleDark = 2,
     LiquidGlassStyleVibrant = 3
 };
+
+static BOOL wailsUsesSmoothWindowZoom(void) {
+    // macOS 26 presents a cached window surface while zoom: blocks the main
+    // run loop. Driving the frame ourselves keeps WKWebView resizing live.
+    if (@available(macOS 26.0, *)) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
+    const CGFloat tolerance = 0.5;
+    return ABS(first.origin.x - second.origin.x) < tolerance &&
+        ABS(first.origin.y - second.origin.y) < tolerance &&
+        ABS(first.size.width - second.size.width) < tolerance &&
+        ABS(first.size.height - second.size.height) < tolerance;
+}
+
+@interface WebviewWindow ()
+
+@property (retain) NSTimer *wailsZoomAnimationTimer;
+@property NSRect wailsZoomStartFrame;
+@property NSRect wailsZoomTargetFrame;
+@property NSRect wailsUnzoomedFrame;
+@property NSRect wailsZoomedFrame;
+@property CFTimeInterval wailsZoomAnimationStartTime;
+@property NSTimeInterval wailsZoomAnimationDuration;
+@property BOOL wailsZoomed;
+@property BOOL wailsZoomingToZoomed;
+
+- (void)wailsAnimateZoomToFrame:(NSRect)targetFrame zoomed:(BOOL)zoomed;
+- (void)wailsFrameDidChange;
+
+@end
+
 @implementation WebviewWindow
 - (WebviewWindow*) initWithContentRect:(NSRect)contentRect styleMask:(NSUInteger)windowStyle backing:(NSBackingStoreType)bufferingType defer:(BOOL)deferCreation;
 {
@@ -207,6 +242,8 @@ typedef NS_ENUM(NSInteger, MacLiquidGlassStyle) {
     }
 }
 - (void) dealloc {
+    [self.wailsZoomAnimationTimer invalidate];
+    self.wailsZoomAnimationTimer = nil;
     // Remove the script handler, otherwise WebviewWindowDelegate won't get deallocated
     // See: https://stackoverflow.com/questions/26383031/wkwebview-causes-my-view-controller-to-leak
     [self.webView.configuration.userContentController removeScriptMessageHandlerForName:@"external"];
@@ -214,6 +251,97 @@ typedef NS_ENUM(NSInteger, MacLiquidGlassStyle) {
         [self.delegate release];
     }
     [super dealloc];
+}
+- (void)zoom:(id)sender {
+    if (!wailsUsesSmoothWindowZoom()) {
+        [super zoom:sender];
+        return;
+    }
+    if (self.wailsZoomAnimationTimer != nil) {
+        return;
+    }
+    if (self.wailsZoomed) {
+        [self wailsAnimateZoomToFrame:self.wailsUnzoomedFrame zoomed:NO];
+        return;
+    }
+    // Let AppKit calculate the standard frame. The delegate intercepts it in
+    // windowShouldZoom:toFrame: and starts a non-blocking frame animation.
+    [super zoom:sender];
+}
+- (BOOL)isZoomed {
+    if (wailsUsesSmoothWindowZoom()) {
+        return self.wailsZoomed;
+    }
+    return [super isZoomed];
+}
+- (void)wailsAnimateZoomToFrame:(NSRect)targetFrame zoomed:(BOOL)zoomed {
+    if (self.wailsZoomAnimationTimer != nil) {
+        return;
+    }
+    if (zoomed) {
+        self.wailsUnzoomedFrame = self.frame;
+        self.wailsZoomedFrame = targetFrame;
+    }
+    if (wailsFramesAreEqual(self.frame, targetFrame)) {
+        self.wailsZoomed = zoomed;
+        [self windowDidZoom:[NSNotification notificationWithName:@"WailsWindowDidZoom" object:self]];
+        return;
+    }
+    self.wailsZoomStartFrame = self.frame;
+    self.wailsZoomTargetFrame = targetFrame;
+    self.wailsZoomingToZoomed = zoomed;
+    self.wailsZoomAnimationStartTime = CACurrentMediaTime();
+    self.wailsZoomAnimationDuration = [self animationResizeTime:targetFrame];
+    if ([NSWorkspace sharedWorkspace].accessibilityDisplayShouldReduceMotion ||
+        self.wailsZoomAnimationDuration <= 0.0) {
+        self.wailsZoomed = zoomed;
+        [self setFrame:targetFrame display:YES animate:NO];
+        [self windowDidZoom:[NSNotification notificationWithName:@"WailsWindowDidZoom" object:self]];
+        return;
+    }
+    self.wailsZoomAnimationTimer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+                                                           target:self
+                                                         selector:@selector(wailsAdvanceZoomAnimation:)
+                                                         userInfo:nil
+                                                          repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:self.wailsZoomAnimationTimer forMode:NSRunLoopCommonModes];
+}
+- (void)wailsAdvanceZoomAnimation:(NSTimer *)timer {
+    CGFloat progress = (CACurrentMediaTime() - self.wailsZoomAnimationStartTime) /
+        self.wailsZoomAnimationDuration;
+    progress = MIN(MAX(progress, 0.0), 1.0);
+    CGFloat easedProgress;
+    if (progress < 0.5) {
+        easedProgress = 4.0 * progress * progress * progress;
+    } else {
+        CGFloat remaining = -2.0 * progress + 2.0;
+        easedProgress = 1.0 - (remaining * remaining * remaining) / 2.0;
+    }
+    NSRect frame = NSMakeRect(
+        self.wailsZoomStartFrame.origin.x +
+            (self.wailsZoomTargetFrame.origin.x - self.wailsZoomStartFrame.origin.x) * easedProgress,
+        self.wailsZoomStartFrame.origin.y +
+            (self.wailsZoomTargetFrame.origin.y - self.wailsZoomStartFrame.origin.y) * easedProgress,
+        self.wailsZoomStartFrame.size.width +
+            (self.wailsZoomTargetFrame.size.width - self.wailsZoomStartFrame.size.width) * easedProgress,
+        self.wailsZoomStartFrame.size.height +
+            (self.wailsZoomTargetFrame.size.height - self.wailsZoomStartFrame.size.height) * easedProgress);
+    [self setFrame:frame display:YES animate:NO];
+    if (progress >= 1.0) {
+        [timer invalidate];
+        self.wailsZoomAnimationTimer = nil;
+        self.wailsZoomed = self.wailsZoomingToZoomed;
+        [self windowDidZoom:[NSNotification notificationWithName:@"WailsWindowDidZoom" object:self]];
+    }
+}
+- (void)wailsFrameDidChange {
+    if (!wailsUsesSmoothWindowZoom() || self.wailsZoomAnimationTimer != nil || !self.wailsZoomed) {
+        return;
+    }
+    if (!wailsFramesAreEqual(self.frame, self.wailsZoomedFrame)) {
+        self.wailsZoomed = NO;
+        [self windowDidZoom:[NSNotification notificationWithName:@"WailsWindowDidZoom" object:self]];
+    }
 }
 - (void)windowDidZoom:(NSNotification *)notification {
     NSWindow *window = notification.object;
@@ -229,14 +357,14 @@ typedef NS_ENUM(NSInteger, MacLiquidGlassStyle) {
     }
 }
 - (void)performZoomIn:(id)sender {
-    [super zoom:sender];
+    [self zoom:sender];
     if (hasListeners(EventWindowZoomIn)) {
         WebviewWindowDelegate* delegate = (WebviewWindowDelegate*)[sender delegate];
         processWindowEvent(delegate.windowId, EventWindowZoomIn);
     }
 }
 - (void)performZoomOut:(id)sender {
-    [super zoom:sender];
+    [self zoom:sender];
     if (hasListeners(EventWindowZoomOut)) {
         WebviewWindowDelegate* delegate = (WebviewWindowDelegate*)[sender delegate];
         processWindowEvent(delegate.windowId, EventWindowZoomOut);
@@ -551,6 +679,9 @@ typedef NS_ENUM(NSInteger, MacLiquidGlassStyle) {
     }
 }
 - (void)windowDidMove:(NSNotification *)notification {
+    if ([notification.object isKindOfClass:[WebviewWindow class]]) {
+        [(WebviewWindow *)notification.object wailsFrameDidChange];
+    }
     if( hasListeners(EventWindowDidMove) ) {
         processWindowEvent(self.windowId, EventWindowDidMove);
     }
@@ -576,6 +707,9 @@ typedef NS_ENUM(NSInteger, MacLiquidGlassStyle) {
     }
 }
 - (void)windowDidResize:(NSNotification *)notification {
+    if ([notification.object isKindOfClass:[WebviewWindow class]]) {
+        [(WebviewWindow *)notification.object wailsFrameDidChange];
+    }
     if( hasListeners(EventWindowDidResize) ) {
         processWindowEvent(self.windowId, EventWindowDidResize);
     }
@@ -745,10 +879,18 @@ typedef NS_ENUM(NSInteger, MacLiquidGlassStyle) {
         processWindowEvent(self.windowId, EventWindowWillUpdateVisibility);
     }
 }
-- (void)windowWillUseStandardFrame:(NSNotification *)notification {
+- (NSRect)windowWillUseStandardFrame:(NSWindow *)window defaultFrame:(NSRect)newFrame {
     if( hasListeners(EventWindowWillUseStandardFrame) ) {
         processWindowEvent(self.windowId, EventWindowWillUseStandardFrame);
     }
+    return newFrame;
+}
+- (BOOL)windowShouldZoom:(NSWindow *)window toFrame:(NSRect)newFrame {
+    if (wailsUsesSmoothWindowZoom() && [window isKindOfClass:[WebviewWindow class]]) {
+        [(WebviewWindow *)window wailsAnimateZoomToFrame:newFrame zoomed:YES];
+        return NO;
+    }
+    return YES;
 }
 - (void)windowFileDraggingEntered:(NSNotification *)notification {
     if( hasListeners(EventWindowFileDraggingEntered) ) {
