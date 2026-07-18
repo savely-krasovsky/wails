@@ -30,6 +30,9 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
 @interface WebviewWindow ()
 
 @property (retain) NSTimer *wailsZoomAnimationTimer;
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+@property (retain) CADisplayLink *wailsZoomDisplayLink;
+#endif
 @property NSRect wailsZoomStartFrame;
 @property NSRect wailsZoomTargetFrame;
 @property NSRect wailsUnzoomedFrame;
@@ -40,6 +43,13 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
 @property BOOL wailsZoomingToZoomed;
 
 - (void)wailsAnimateZoomToFrame:(NSRect)targetFrame zoomed:(BOOL)zoomed;
+- (BOOL)wailsZoomAnimationIsRunning;
+- (void)wailsStopZoomAnimationDriver;
+- (void)wailsAdvanceZoomAnimationFromTimer:(NSTimer *)timer;
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+- (void)wailsAdvanceZoomAnimationFromDisplayLink:(CADisplayLink *)displayLink API_AVAILABLE(macos(14.0));
+#endif
+- (void)wailsAdvanceZoomAnimationAtTime:(CFTimeInterval)time;
 - (void)wailsFrameDidChange;
 
 @end
@@ -233,8 +243,7 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     }
 }
 - (void) dealloc {
-    [self.wailsZoomAnimationTimer invalidate];
-    self.wailsZoomAnimationTimer = nil;
+    [self wailsStopZoomAnimationDriver];
     // Remove the script handler, otherwise WebviewWindowDelegate won't get deallocated
     // See: https://stackoverflow.com/questions/26383031/wkwebview-causes-my-view-controller-to-leak
     [self.webView.configuration.userContentController removeScriptMessageHandlerForName:@"external"];
@@ -244,7 +253,7 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     [super dealloc];
 }
 - (void)zoom:(id)sender {
-    if (self.wailsZoomAnimationTimer != nil) {
+    if ([self wailsZoomAnimationIsRunning]) {
         return;
     }
     if (self.wailsZoomed) {
@@ -259,7 +268,7 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     return self.wailsZoomed;
 }
 - (void)wailsAnimateZoomToFrame:(NSRect)targetFrame zoomed:(BOOL)zoomed {
-    if (self.wailsZoomAnimationTimer != nil) {
+    if ([self wailsZoomAnimationIsRunning]) {
         return;
     }
     if (zoomed) {
@@ -283,15 +292,67 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
         [self windowDidZoom:[NSNotification notificationWithName:@"WailsWindowDidZoom" object:self]];
         return;
     }
-    self.wailsZoomAnimationTimer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+    // Follow the window's current display and request its highest refresh rate.
+    // Keep the timer path for older macOS versions and SDKs.
+    if (@available(macOS 14.0, *)) {
+        if (self.screen != nil) {
+            self.wailsZoomDisplayLink = [self displayLinkWithTarget:self
+                                                           selector:@selector(wailsAdvanceZoomAnimationFromDisplayLink:)];
+            NSInteger maximumFramesPerSecond = self.screen.maximumFramesPerSecond;
+            if (maximumFramesPerSecond > 0) {
+                NSInteger minimumFramesPerSecond = MIN(60, maximumFramesPerSecond);
+                self.wailsZoomDisplayLink.preferredFrameRateRange = CAFrameRateRangeMake(
+                    minimumFramesPerSecond, maximumFramesPerSecond, maximumFramesPerSecond);
+            }
+            [self.wailsZoomDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+            return;
+        }
+    }
+#endif
+    NSInteger framesPerSecond = 60;
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 120000
+    if (@available(macOS 12.0, *)) {
+        NSInteger maximumFramesPerSecond = self.screen.maximumFramesPerSecond;
+        if (maximumFramesPerSecond > 0) {
+            framesPerSecond = maximumFramesPerSecond;
+        }
+    }
+#endif
+    self.wailsZoomAnimationTimer = [NSTimer timerWithTimeInterval:1.0 / framesPerSecond
                                                            target:self
-                                                         selector:@selector(wailsAdvanceZoomAnimation:)
+                                                         selector:@selector(wailsAdvanceZoomAnimationFromTimer:)
                                                          userInfo:nil
                                                           repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:self.wailsZoomAnimationTimer forMode:NSRunLoopCommonModes];
 }
-- (void)wailsAdvanceZoomAnimation:(NSTimer *)timer {
-    CGFloat progress = (CACurrentMediaTime() - self.wailsZoomAnimationStartTime) /
+- (BOOL)wailsZoomAnimationIsRunning {
+    BOOL isRunning = self.wailsZoomAnimationTimer != nil;
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+    isRunning = isRunning || self.wailsZoomDisplayLink != nil;
+#endif
+    return isRunning;
+}
+- (void)wailsStopZoomAnimationDriver {
+    [self.wailsZoomAnimationTimer invalidate];
+    self.wailsZoomAnimationTimer = nil;
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+    if (@available(macOS 14.0, *)) {
+        [self.wailsZoomDisplayLink invalidate];
+        self.wailsZoomDisplayLink = nil;
+    }
+#endif
+}
+- (void)wailsAdvanceZoomAnimationFromTimer:(NSTimer *)timer {
+    [self wailsAdvanceZoomAnimationAtTime:CACurrentMediaTime()];
+}
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+- (void)wailsAdvanceZoomAnimationFromDisplayLink:(CADisplayLink *)displayLink API_AVAILABLE(macos(14.0)) {
+    [self wailsAdvanceZoomAnimationAtTime:displayLink.targetTimestamp];
+}
+#endif
+- (void)wailsAdvanceZoomAnimationAtTime:(CFTimeInterval)time {
+    CGFloat progress = (time - self.wailsZoomAnimationStartTime) /
         self.wailsZoomAnimationDuration;
     progress = MIN(MAX(progress, 0.0), 1.0);
     CGFloat easedProgress;
@@ -312,14 +373,13 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
             (self.wailsZoomTargetFrame.size.height - self.wailsZoomStartFrame.size.height) * easedProgress);
     [self setFrame:frame display:YES animate:NO];
     if (progress >= 1.0) {
-        [timer invalidate];
-        self.wailsZoomAnimationTimer = nil;
+        [self wailsStopZoomAnimationDriver];
         self.wailsZoomed = self.wailsZoomingToZoomed;
         [self windowDidZoom:[NSNotification notificationWithName:@"WailsWindowDidZoom" object:self]];
     }
 }
 - (void)wailsFrameDidChange {
-    if (self.wailsZoomAnimationTimer != nil || !self.wailsZoomed) {
+    if ([self wailsZoomAnimationIsRunning] || !self.wailsZoomed) {
         return;
     }
     if (!wailsFramesAreEqual(self.frame, self.wailsZoomedFrame)) {
