@@ -1333,6 +1333,23 @@ func (w *WebviewWindow) restoreSavedSizeConstraintOptions() bool {
 	return true
 }
 
+// restoreNativeSizeConstraints restores saved constraints on the platform
+// window without changing its current frame.
+func (w *WebviewWindow) restoreNativeSizeConstraints() {
+	if w.impl == nil || w.isDestroyed() {
+		return
+	}
+	InvokeSync(func() {
+		w.restoreSavedSizeConstraintOptions()
+		if w.options.MinWidth > 0 || w.options.MinHeight > 0 {
+			w.impl.setMinSize(w.options.MinWidth, w.options.MinHeight)
+		}
+		if w.options.MaxWidth > 0 || w.options.MaxHeight > 0 {
+			w.impl.setMaxSize(w.options.MaxWidth, w.options.MaxHeight)
+		}
+	})
+}
+
 func (w *WebviewWindow) EnableSizeConstraints() {
 	if w.impl == nil || w.isDestroyed() {
 		return

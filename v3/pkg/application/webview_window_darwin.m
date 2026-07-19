@@ -11,6 +11,7 @@ extern void processWindowKeyDownEvent(unsigned int, const char*);
 extern bool hasListeners(unsigned int);
 extern bool windowShouldUnconditionallyClose(unsigned int);
 extern bool windowIsHidden(unsigned int);
+extern void restoreWindowSizeConstraints(unsigned int);
 // Define custom glass effect style constants (these match the Go constants)
 typedef NS_ENUM(NSInteger, MacLiquidGlassStyle) {
     LiquidGlassStyleAutomatic = 0,
@@ -51,6 +52,8 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
 #endif
 - (void)wailsAdvanceZoomAnimationAtTime:(CFTimeInterval)time;
 - (void)wailsFrameDidChange;
+- (void)wailsRestoreSizeConstraints;
+- (void)wailsExitZoomedState;
 
 @end
 
@@ -62,6 +65,7 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     [self setBackgroundColor:[NSColor clearColor]];
     [self setOpaque:NO];
     [self setMovableByWindowBackground:YES];
+    [self setPreservesContentDuringLiveResize:NO];
     return self;
 }
 - (void)keyDown:(NSEvent *)event {
@@ -257,6 +261,7 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
         return;
     }
     if (self.wailsZoomed) {
+        [self wailsRestoreSizeConstraints];
         [self wailsAnimateZoomToFrame:self.wailsUnzoomedFrame zoomed:NO];
         return;
     }
@@ -374,8 +379,12 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
     [self setFrame:frame display:YES animate:NO];
     if (progress >= 1.0) {
         [self wailsStopZoomAnimationDriver];
-        self.wailsZoomed = self.wailsZoomingToZoomed;
-        [self windowDidZoom:[NSNotification notificationWithName:@"WailsWindowDidZoom" object:self]];
+        if (self.wailsZoomingToZoomed) {
+            self.wailsZoomed = YES;
+            [self windowDidZoom:[NSNotification notificationWithName:@"WailsWindowDidZoom" object:self]];
+        } else {
+            [self wailsExitZoomedState];
+        }
     }
 }
 - (void)wailsFrameDidChange {
@@ -383,7 +392,25 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
         return;
     }
     if (!wailsFramesAreEqual(self.frame, self.wailsZoomedFrame)) {
-        self.wailsZoomed = NO;
+        [self wailsExitZoomedState];
+    }
+}
+- (void)wailsRestoreSizeConstraints {
+    WebviewWindowDelegate *delegate = (WebviewWindowDelegate *)self.delegate;
+    if ([delegate isKindOfClass:[WebviewWindowDelegate class]]) {
+        restoreWindowSizeConstraints(delegate.windowId);
+    }
+}
+- (void)wailsExitZoomedState {
+    BOOL zoomingToZoomed = [self wailsZoomAnimationIsRunning] && self.wailsZoomingToZoomed;
+    if (!self.wailsZoomed && !zoomingToZoomed) {
+        return;
+    }
+    BOOL wasZoomed = self.wailsZoomed;
+    [self wailsStopZoomAnimationDriver];
+    [self wailsRestoreSizeConstraints];
+    self.wailsZoomed = NO;
+    if (wasZoomed) {
         [self windowDidZoom:[NSNotification notificationWithName:@"WailsWindowDidZoom" object:self]];
     }
 }
@@ -758,6 +785,14 @@ static BOOL wailsFramesAreEqual(NSRect first, NSRect second) {
         processWindowEvent(self.windowId, EventWindowDidResize);
     }
 }
+- (void)windowWillStartLiveResize:(NSNotification *)notification {
+    if ([notification.object isKindOfClass:[WebviewWindow class]]) {
+        // Maximise() removes the native min/max sizes. A resize from a zoomed
+        // window bypasses WebviewWindow.UnMaximise(), so restore them before
+        // AppKit calculates the first user-driven frame.
+        [(WebviewWindow *)notification.object wailsExitZoomedState];
+    }
+}
 - (void)windowDidUpdate:(NSNotification *)notification {
     if( hasListeners(EventWindowDidUpdate) ) {
         processWindowEvent(self.windowId, EventWindowDidUpdate);
@@ -1092,7 +1127,7 @@ void windowSetLiquidGlass(void* nsWindow, int style, int material, double corner
             // Create NSGlassEffectView (autoreleased)
             glassView = [[[NSGlassEffectViewClass alloc] init] autorelease];
             // Set corner radius if the property exists
-            if (cornerRadius > 0 && [glassView respondsToSelector:@selector(setCornerRadius:)]) {
+            if ([glassView respondsToSelector:@selector(setCornerRadius:)]) {
                 [glassView setValue:@(cornerRadius) forKey:@"cornerRadius"];
             }
             // Set tint color if the property exists and color is specified
