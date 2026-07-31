@@ -73,6 +73,33 @@ describe("On", () => {
   });
 });
 
+describe("dispatch order", () => {
+  it("invokes the next callback without awaiting a returned promise", async () => {
+    const calls = [];
+    let releaseFirst;
+    const firstPending = new Promise(resolve => {
+      releaseFirst = resolve;
+    });
+
+    On('ordered', async event => {
+      calls.push(`start:${event.data}`);
+      if (event.data === 1) {
+        await firstPending;
+      }
+      calls.push(`end:${event.data}`);
+    });
+
+    dispatchWailsEvent({ name: 'ordered', data: 1 });
+    dispatchWailsEvent({ name: 'ordered', data: 2 });
+    expect(calls).toEqual(['start:1', 'start:2', 'end:2']);
+
+    releaseFirst();
+    await firstPending;
+    await Promise.resolve();
+    expect(calls).toEqual(['start:1', 'start:2', 'end:2', 'end:1']);
+  });
+});
+
 describe("Once", () => {
   const testEvent = { name: 'a', data: ["hello", "events"] };
   const cb = vi.fn((ev) => {
