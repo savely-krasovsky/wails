@@ -1,14 +1,14 @@
 package application
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"slices"
 	"sync"
 	"sync/atomic"
 
-	"encoding/json"
-
+	"github.com/wailsapp/wails/v3/internal/mailbox"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
@@ -37,14 +37,10 @@ func (w *ApplicationEvent) IsCancelled() bool {
 	return w.cancelled.Load()
 }
 
-var applicationEvents = make(chan *ApplicationEvent, 5)
-
 type windowEvent struct {
 	WindowID uint
 	EventID  uint
 }
-
-var windowEvents = make(chan *windowEvent, 5)
 
 var menuItemClicked = make(chan uint, 5)
 
@@ -77,9 +73,22 @@ func (e *CustomEvent) ToJSON() string {
 }
 
 // WailsEventListener is an interface for receiving all emitted Wails events.
-// Used by transport layers (IPC, WebSocket) to broadcast events.
+// Used by transport layers (IPC, WebSocket) to broadcast events. Calls are made
+// serially in emit order. Implementations that forward events asynchronously
+// must preserve that order.
 type WailsEventListener interface {
 	DispatchWailsEvent(event *CustomEvent)
+}
+
+type wailsEventConsumer struct {
+	events *mailbox.Mailbox[*CustomEvent]
+}
+
+func newWailsEventConsumer(listener WailsEventListener) *wailsEventConsumer {
+	return &wailsEventConsumer{events: mailbox.New(func(event *CustomEvent) {
+		defer handlePanic()
+		listener.DispatchWailsEvent(event)
+	})}
 }
 
 type hook struct {
@@ -93,25 +102,32 @@ type hook struct {
 type eventListener struct {
 	callback func(*CustomEvent) // Function to call with emitted event data
 	counter  int                // The number of times this callback may be called. -1 = infinite
-	delete   bool               // Flag to indicate that this listener should be deleted
+	events   *mailbox.Mailbox[*CustomEvent]
 }
 
 // EventProcessor handles custom events
 type EventProcessor struct {
 	// Go event listeners
-	listeners              map[string][]*eventListener
-	notifyLock             sync.RWMutex
-	dispatchEventToWindows func(*CustomEvent)
-	hooks                  map[string][]*hook
-	hookLock               sync.RWMutex
+	listeners  map[string][]*eventListener
+	notifyLock sync.RWMutex
+	events     *mailbox.Mailbox[*CustomEvent]
+	hooks      map[string][]*hook
+	hookLock   sync.RWMutex
 }
 
 func NewWailsEventProcessor(dispatchEventToWindows func(*CustomEvent)) *EventProcessor {
-	return &EventProcessor{
-		listeners:              make(map[string][]*eventListener),
-		dispatchEventToWindows: dispatchEventToWindows,
-		hooks:                  make(map[string][]*hook),
+	result := &EventProcessor{
+		listeners: make(map[string][]*eventListener),
+		hooks:     make(map[string][]*hook),
 	}
+	result.events = mailbox.New(func(event *CustomEvent) {
+		result.dispatchEventToListeners(event)
+		func() {
+			defer handlePanic()
+			dispatchEventToWindows(event)
+		}()
+	})
+	return result
 }
 
 // On is the equivalent of Javascript's `addEventListener`
@@ -145,26 +161,19 @@ func (e *EventProcessor) Emit(thisEvent *CustomEvent) error {
 		return err
 	}
 
-	// If we have any hooks, run them first and check if the event was cancelled
-	if e.hooks != nil {
-		if hooks, ok := e.hooks[thisEvent.Name]; ok {
-			for _, thisHook := range hooks {
-				thisHook.callback(thisEvent)
-				if thisEvent.IsCancelled() {
-					return nil
-				}
-			}
+	// Hooks are the only cancellation point and stay synchronous so Emit can
+	// report their result.
+	e.hookLock.RLock()
+	hooks := slices.Clone(e.hooks[thisEvent.Name])
+	e.hookLock.RUnlock()
+	for _, thisHook := range hooks {
+		thisHook.callback(thisEvent)
+		if thisEvent.IsCancelled() {
+			return nil
 		}
 	}
 
-	go func() {
-		defer handlePanic()
-		e.dispatchEventToListeners(thisEvent)
-	}()
-	go func() {
-		defer handlePanic()
-		e.dispatchEventToWindows(thisEvent)
-	}()
+	e.events.Send(thisEvent)
 
 	return nil
 }
@@ -175,8 +184,28 @@ func (e *EventProcessor) Off(eventName string) {
 
 func (e *EventProcessor) OffAll() {
 	e.notifyLock.Lock()
-	defer e.notifyLock.Unlock()
+	listeners := e.listeners
 	e.listeners = make(map[string][]*eventListener)
+	e.notifyLock.Unlock()
+	for _, eventListeners := range listeners {
+		for _, listener := range eventListeners {
+			listener.events.Close()
+		}
+	}
+}
+
+// Close stops the processor and discards work that has not started.
+func (e *EventProcessor) Close() {
+	e.events.Stop()
+	e.notifyLock.Lock()
+	listeners := e.listeners
+	e.listeners = make(map[string][]*eventListener)
+	e.notifyLock.Unlock()
+	for _, eventListeners := range listeners {
+		for _, listener := range eventListeners {
+			listener.events.Stop()
+		}
+	}
 }
 
 // registerListener provides a means of subscribing to events of type "eventName"
@@ -185,22 +214,22 @@ func (e *EventProcessor) registerListener(eventName string, callback func(*Custo
 	thisListener := &eventListener{
 		callback: callback,
 		counter:  counter,
-		delete:   false,
 	}
+	thisListener.events = mailbox.New(func(event *CustomEvent) {
+		defer handlePanic()
+		thisListener.callback(event)
+	})
 	e.notifyLock.Lock()
 	// Append the new listener to the listeners slice
 	e.listeners[eventName] = append(e.listeners[eventName], thisListener)
 	e.notifyLock.Unlock()
 	return func() {
 		e.notifyLock.Lock()
-		defer e.notifyLock.Unlock()
-
-		if _, ok := e.listeners[eventName]; !ok {
-			return
-		}
 		e.listeners[eventName] = slices.DeleteFunc(e.listeners[eventName], func(l *eventListener) bool {
 			return l == thisListener
 		})
+		e.notifyLock.Unlock()
+		thisListener.events.Close()
 	}
 }
 
@@ -230,49 +259,36 @@ func (e *EventProcessor) RegisterHook(eventName string, callback func(*CustomEve
 // unRegisterListener provides a means of unsubscribing to events of type "eventName"
 func (e *EventProcessor) unRegisterListener(eventName string) {
 	e.notifyLock.Lock()
-	defer e.notifyLock.Unlock()
+	listeners := e.listeners[eventName]
 	delete(e.listeners, eventName)
+	e.notifyLock.Unlock()
+	for _, listener := range listeners {
+		listener.events.Close()
+	}
 }
 
 // dispatchEventToListeners calls all registered listeners event name
 func (e *EventProcessor) dispatchEventToListeners(event *CustomEvent) {
-
 	e.notifyLock.Lock()
-	defer e.notifyLock.Unlock()
-
 	listeners := e.listeners[event.Name]
-	if listeners == nil {
-		return
-	}
-
-	// We have a dirty flag to indicate that there are items to delete
-	itemsToDelete := false
-
-	// Callback in goroutine
+	remaining := listeners[:0]
 	for _, listener := range listeners {
 		if listener.counter > 0 {
 			listener.counter--
 		}
-		go func() {
-			if event.IsCancelled() {
-				return
-			}
-			defer handlePanic()
-			listener.callback(event)
-		}()
-
+		listener.events.Send(event)
 		if listener.counter == 0 {
-			listener.delete = true
-			itemsToDelete = true
+			listener.events.Close()
+		} else {
+			remaining = append(remaining, listener)
 		}
 	}
-
-	// Do we have items to delete?
-	if itemsToDelete == true {
-		e.listeners[event.Name] = slices.DeleteFunc(listeners, func(l *eventListener) bool {
-			return l.delete == true
-		})
+	if len(remaining) == 0 {
+		delete(e.listeners, event.Name)
+	} else {
+		e.listeners[event.Name] = remaining
 	}
+	e.notifyLock.Unlock()
 }
 
 // Void will be translated by the binding generator to the TypeScript type 'void'.

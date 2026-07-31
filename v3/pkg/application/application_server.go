@@ -59,9 +59,7 @@ func (h *serverApp) run() error {
 	// Create WebSocket broadcaster for events
 	h.broadcaster = NewWebSocketBroadcaster(h.app)
 	globalBroadcaster = h.broadcaster // Set global reference for browser ID lookups
-	h.app.wailsEventListenerLock.Lock()
-	h.app.wailsEventListeners = append(h.app.wailsEventListeners, h.broadcaster)
-	h.app.wailsEventListenerLock.Unlock()
+	h.app.addWailsEventListener(h.broadcaster)
 
 	opts := h.app.options.Server
 

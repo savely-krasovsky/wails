@@ -151,10 +151,10 @@ func (m *windowsApp) run() error {
 		m.on(eventID)
 	}
 	// EmitEvent application started event
-	applicationEvents <- &ApplicationEvent{
+	dispatchApplicationEvent(&ApplicationEvent{
 		Id:  uint(events.Windows.ApplicationStarted),
 		ctx: blankApplicationEventContext,
-	}
+	})
 
 	if len(os.Args) == 2 { // Case: program + 1 argument
 		arg1 := os.Args[1]
@@ -163,10 +163,10 @@ func (m *windowsApp) run() error {
 			m.parent.debug("Application launched with argument, potentially a URL from custom protocol", "url", arg1)
 			eventContext := newApplicationEventContext()
 			eventContext.setURL(arg1)
-			applicationEvents <- &ApplicationEvent{
+			dispatchApplicationEvent(&ApplicationEvent{
 				Id:  uint(events.Common.ApplicationLaunchedWithUrl),
 				ctx: eventContext,
-			}
+			})
 		} else {
 			// If not a URL-like string, check for file association
 			if m.parent.options.FileAssociations != nil {
@@ -175,10 +175,10 @@ func (m *windowsApp) run() error {
 					m.parent.debug("Application launched with file via file association", "file", arg1)
 					eventContext := newApplicationEventContext()
 					eventContext.setOpenedWithFile(arg1)
-					applicationEvents <- &ApplicationEvent{
+					dispatchApplicationEvent(&ApplicationEvent{
 						Id:  uint(events.Common.ApplicationOpenedWithFile),
 						ctx: eventContext,
-					}
+					})
 				}
 			}
 		}
@@ -282,10 +282,10 @@ func (m *windowsApp) wndProc(hwnd w32.HWND, msg uint32, wParam, lParam uintptr) 
 			if isDarkMode != m.isCurrentlyDarkMode {
 				eventContext := newApplicationEventContext()
 				eventContext.setIsDarkMode(isDarkMode)
-				applicationEvents <- &ApplicationEvent{
+				dispatchApplicationEvent(&ApplicationEvent{
 					Id:  uint(events.Windows.SystemThemeChanged),
 					ctx: eventContext,
-				}
+				})
 				m.isCurrentlyDarkMode = isDarkMode
 			}
 		}
@@ -293,15 +293,15 @@ func (m *windowsApp) wndProc(hwnd w32.HWND, msg uint32, wParam, lParam uintptr) 
 	case w32.WM_POWERBROADCAST:
 		switch wParam {
 		case w32.PBT_APMPOWERSTATUSCHANGE:
-			applicationEvents <- newApplicationEvent(events.Windows.APMPowerStatusChange)
+			dispatchApplicationEvent(newApplicationEvent(events.Windows.APMPowerStatusChange))
 		case w32.PBT_APMSUSPEND:
-			applicationEvents <- newApplicationEvent(events.Windows.APMSuspend)
+			dispatchApplicationEvent(newApplicationEvent(events.Windows.APMSuspend))
 		case w32.PBT_APMRESUMEAUTOMATIC:
-			applicationEvents <- newApplicationEvent(events.Windows.APMResumeAutomatic)
+			dispatchApplicationEvent(newApplicationEvent(events.Windows.APMResumeAutomatic))
 		case w32.PBT_APMRESUMESUSPEND:
-			applicationEvents <- newApplicationEvent(events.Windows.APMResumeSuspend)
+			dispatchApplicationEvent(newApplicationEvent(events.Windows.APMResumeSuspend))
 		case w32.PBT_POWERSETTINGCHANGE:
-			applicationEvents <- newApplicationEvent(events.Windows.APMPowerSettingChange)
+			dispatchApplicationEvent(newApplicationEvent(events.Windows.APMPowerSettingChange))
 		}
 		return 0
 	}

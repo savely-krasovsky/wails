@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/wailsapp/wails/v3/internal/assetserver"
+	"github.com/wailsapp/wails/v3/internal/mailbox"
 	"github.com/wailsapp/wails/v3/internal/optional"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
@@ -165,6 +167,7 @@ func (w *WindowEvent) Cancel() {
 
 type WindowEventListener struct {
 	callback func(event *WindowEvent)
+	events   *mailbox.Mailbox[*WindowEvent]
 }
 
 type WebviewWindow struct {
@@ -176,6 +179,8 @@ type WebviewWindow struct {
 	eventListenersLock sync.RWMutex
 	eventHooks         map[uint][]*WindowEventListener
 	eventHooksLock     sync.RWMutex
+	windowEvents       *mailbox.Mailbox[uint]
+	frontendEvents     *frontendEventQueue
 
 	// A map of listener cancellation functions
 	cancellersLock sync.RWMutex
@@ -268,8 +273,24 @@ func (w *WebviewWindow) onApplicationEvent(
 
 func (w *WebviewWindow) markAsDestroyed() {
 	w.destroyedLock.Lock()
-	defer w.destroyedLock.Unlock()
+	if w.destroyed {
+		w.destroyedLock.Unlock()
+		return
+	}
 	w.destroyed = true
+	w.destroyedLock.Unlock()
+
+	w.windowEvents.Stop()
+	w.frontendEvents.stop()
+	w.eventListenersLock.Lock()
+	listeners := w.eventListeners
+	w.eventListeners = make(map[uint][]*WindowEventListener)
+	w.eventListenersLock.Unlock()
+	for _, eventListeners := range listeners {
+		for _, listener := range eventListeners {
+			listener.events.Stop()
+		}
+	}
 }
 
 func (w *WebviewWindow) setupEventMapping() {
@@ -329,6 +350,10 @@ func NewWindow(options WebviewWindowOptions) *WebviewWindow {
 		eventHooks:     make(map[uint][]*WindowEventListener),
 		menuBindings:   make(map[string]*MenuItem),
 	}
+	result.windowEvents = mailbox.New(result.processWindowEvent)
+	result.frontendEvents = newFrontendEventQueue(result.sendFrontendEvent, func(err error) {
+		result.Error("frontend event delivery error: %v", err)
+	})
 
 	result.setupEventMapping()
 
@@ -507,6 +532,7 @@ func (w *WebviewWindow) SetURL(s string) Window {
 	url, _ := assetserver.GetStartURL(s)
 	w.options.URL = url
 	if w.impl != nil {
+		w.frontendEvents.markNotReady()
 		InvokeSync(func() {
 			w.impl.setURL(url)
 		})
@@ -803,6 +829,7 @@ func (w *WebviewWindow) HandleMessage(message string) {
 		message = strings.Replace(message, "wails:non-client-region:", "", 1)
 		w.handleNonClientRegionMessage(message)
 	case message == "wails:runtime:ready":
+		w.frontendEvents.markReady()
 		w.emit(events.Common.WindowRuntimeReady)
 		w.pendingJSMutex.Lock()
 		w.runtimeLoaded = true
@@ -815,6 +842,13 @@ func (w *WebviewWindow) HandleMessage(message string) {
 				w.impl.execJS(js)
 			})
 		}
+	case strings.HasPrefix(message, "wails:event:ack:"):
+		id, err := strconv.ParseUint(strings.TrimPrefix(message, "wails:event:ack:"), 10, 64)
+		if err != nil {
+			w.Error("invalid frontend event acknowledgement: %s", message)
+			return
+		}
+		w.frontendEvents.acknowledge(id)
 	case strings.HasPrefix(message, "wails:event:emit:"):
 		// Forward an event from a page that can't reach the modern HTTP
 		// runtime (e.g. an InitialHTML pop-up loaded with `baseURL:nil`
@@ -910,6 +944,10 @@ func (w *WebviewWindow) OnWindowEvent(
 	windowEventListener := &WindowEventListener{
 		callback: callback,
 	}
+	windowEventListener.events = mailbox.New(func(event *WindowEvent) {
+		defer handlePanic()
+		windowEventListener.callback(event)
+	})
 	w.eventListenersLock.Lock()
 	w.eventListeners[eventID] = append(w.eventListeners[eventID], windowEventListener)
 	w.eventListenersLock.Unlock()
@@ -924,6 +962,7 @@ func (w *WebviewWindow) OnWindowEvent(
 			return l == windowEventListener
 		})
 		w.eventListenersLock.Unlock()
+		windowEventListener.events.Close()
 	}
 }
 
@@ -950,9 +989,15 @@ func (w *WebviewWindow) RegisterHook(
 }
 
 func (w *WebviewWindow) HandleWindowEvent(id uint) {
+	w.windowEvents.Send(id)
+}
+
+func (w *WebviewWindow) processWindowEvent(id uint) {
+	defer handlePanic()
+
 	// Get hooks
 	w.eventHooksLock.RLock()
-	hooks := w.eventHooks[id]
+	hooks := slices.Clone(w.eventHooks[id])
 	w.eventHooksLock.RUnlock()
 
 	// Create new WindowEvent
@@ -965,20 +1010,11 @@ func (w *WebviewWindow) HandleWindowEvent(id uint) {
 		}
 	}
 
-	// Copy the w.eventListeners
 	w.eventListenersLock.RLock()
-	var tempListeners = slices.Clone(w.eventListeners[id])
-	w.eventListenersLock.RUnlock()
-
-	for _, listener := range tempListeners {
-		go func() {
-			if thisEvent.IsCancelled() {
-				return
-			}
-			defer handlePanic()
-			listener.callback(thisEvent)
-		}()
+	for _, listener := range w.eventListeners[id] {
+		listener.events.Send(thisEvent)
 	}
+	w.eventListenersLock.RUnlock()
 	w.dispatchWindowEvent(id)
 }
 
@@ -1127,6 +1163,7 @@ func (w *WebviewWindow) Reload() {
 	if w.impl == nil || w.isDestroyed() {
 		return
 	}
+	w.frontendEvents.markNotReady()
 	InvokeSync(w.impl.reload)
 }
 
@@ -1135,6 +1172,7 @@ func (w *WebviewWindow) ForceReload() {
 	if w.impl == nil || w.isDestroyed() {
 		return
 	}
+	w.frontendEvents.markNotReady()
 	InvokeSync(w.impl.forceReload)
 }
 
@@ -1228,11 +1266,19 @@ func (w *WebviewWindow) Zoom() {
 func (w *WebviewWindow) SetHTML(html string) Window {
 	w.options.HTML = html
 	if w.impl != nil {
+		w.frontendEvents.markNotReady()
 		InvokeSync(func() {
 			w.impl.setHTML(html)
 		})
 	}
 	return w
+}
+
+func isWindowNavigationStart(id uint) bool {
+	return id == uint(events.Linux.WindowLoadStarted) ||
+		id == uint(events.Mac.WebViewDidStartProvisionalNavigation) ||
+		id == uint(events.IOS.WebViewDidStartNavigation) ||
+		id == uint(events.Android.WebViewPageStarted)
 }
 
 // Minimise minimises the window.
@@ -1373,10 +1419,15 @@ func (w *WebviewWindow) DispatchWailsEvent(event *CustomEvent) {
 	if w.impl == nil || w.isDestroyed() {
 		return
 	}
-	// Guard against race condition where event fires before runtime is initialized
-	// This can happen during page reload when WindowLoadFinished fires before
-	// the JavaScript runtime has mounted dispatchWailsEvent on window._wails
-	msg := fmt.Sprintf("if(window._wails&&window._wails.dispatchWailsEvent){window._wails.dispatchWailsEvent(%s);}", event.ToJSON())
+	w.frontendEvents.enqueue(event)
+}
+
+func (w *WebviewWindow) sendFrontendEvent(event *CustomEvent, id uint64) {
+	ack := fmt.Sprintf("wails:event:ack:%d", id)
+	msg := fmt.Sprintf(
+		`(()=>{try{window._wails.dispatchWailsEvent(%s);}finally{window._wails.invoke(%q);}})();`,
+		event.ToJSON(), ack,
+	)
 	w.ExecJS(msg)
 }
 
@@ -1472,10 +1523,10 @@ func (w *WebviewWindow) Focus() {
 }
 
 func (w *WebviewWindow) emit(eventType events.WindowEventType) {
-	windowEvents <- &windowEvent{
+	dispatchWindowEventToApp(&windowEvent{
 		WindowID: w.id,
 		EventID:  uint(eventType),
-	}
+	})
 }
 
 func (w *WebviewWindow) startDrag() error {

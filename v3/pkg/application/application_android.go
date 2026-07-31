@@ -485,7 +485,7 @@ func (a *App) platformRun() {
 	// this point setupCommonEvents has registered its listeners, so the event
 	// (and its Common.ApplicationStarted mapping) cannot be dropped by
 	// startup races.
-	applicationEvents <- newApplicationEvent(events.Android.ActivityCreated)
+	dispatchApplicationEvent(newApplicationEvent(events.Android.ActivityCreated))
 
 	// Block forever - Android manages the app lifecycle via JNI callbacks
 	select {}
@@ -642,7 +642,7 @@ func emitAndroidApplicationEvent(event events.ApplicationEventType) {
 	if app == nil {
 		return
 	}
-	applicationEvents <- newApplicationEvent(event)
+	dispatchApplicationEvent(newApplicationEvent(event))
 }
 
 // androidSystemEventTypes maps the canonical android: event names the Java
@@ -672,7 +672,7 @@ func emitAndroidApplicationEventWithData(event events.ApplicationEventType, json
 			evt.Context().setData(m)
 		}
 	}
-	applicationEvents <- evt
+	dispatchApplicationEvent(evt)
 }
 
 // JNI Export Functions - Called from Java
@@ -803,10 +803,10 @@ func Java_com_wails_app_WailsBridge_nativeOnPageFinished(env *C.JNIEnv, obj C.jo
 	// "wails:runtime:ready", so no runtime injection is needed here. Just
 	// forward the typed window event.
 	if windowID := androidFirstWindowID(app); windowID != 0 {
-		windowEvents <- &windowEvent{
+		dispatchWindowEventToApp(&windowEvent{
 			WindowID: windowID,
 			EventID:  uint(events.Android.WebViewPageFinished),
-		}
+		})
 	}
 }
 

@@ -124,7 +124,7 @@ func processApplicationEvent(eventID C.uint, data pointer) {
 		isDark := globalApplication.Env.IsDarkMode()
 		event.Context().setIsDarkMode(isDark)
 	}
-	applicationEvents <- event
+	dispatchApplicationEvent(event)
 }
 
 func isOnMainThread() bool {
@@ -1779,10 +1779,10 @@ func onDropFiles(paths **C.char, x C.gint, y C.gint, data C.uintptr_t) {
 
 //export processWindowEvent
 func processWindowEvent(windowID C.uint, eventID C.uint) {
-	windowEvents <- &windowEvent{
+	dispatchWindowEventToApp(&windowEvent{
 		WindowID: uint(windowID),
 		EventID:  uint(eventID),
-	}
+	})
 }
 
 //export onProcessRequest

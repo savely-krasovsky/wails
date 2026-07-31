@@ -28,6 +28,7 @@ func BenchmarkEventEmit(b *testing.B) {
 		b.Run(fmt.Sprintf("Listeners%d", count), func(b *testing.B) {
 			dispatcher := &mockWindowDispatcher{}
 			processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
+			defer processor.Close()
 
 			// Register listeners
 			for i := 0; i < count; i++ {
@@ -58,6 +59,7 @@ func BenchmarkEventRegistration(b *testing.B) {
 		for b.Loop() {
 			processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
 			processor.On("test-event", func(event *application.CustomEvent) {})
+			processor.Close()
 		}
 	})
 
@@ -67,6 +69,7 @@ func BenchmarkEventRegistration(b *testing.B) {
 			for i := 0; i < 10; i++ {
 				processor.On(fmt.Sprintf("test-event-%d", i), func(event *application.CustomEvent) {})
 			}
+			processor.Close()
 		}
 	})
 
@@ -76,6 +79,7 @@ func BenchmarkEventRegistration(b *testing.B) {
 			for i := 0; i < 10; i++ {
 				processor.On("test-event", func(event *application.CustomEvent) {})
 			}
+			processor.Close()
 		}
 	})
 }
@@ -89,11 +93,13 @@ func BenchmarkEventUnregistration(b *testing.B) {
 			processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
 			cancel := processor.On("test-event", func(event *application.CustomEvent) {})
 			cancel()
+			processor.Close()
 		}
 	})
 
 	b.Run("UnregisterFromMany", func(b *testing.B) {
 		processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
+		defer processor.Close()
 		// Pre-register many listeners
 		cancels := make([]func(), 100)
 		for i := 0; i < 100; i++ {
@@ -119,6 +125,7 @@ func BenchmarkEventUnregistration(b *testing.B) {
 				processor.On("test-event", func(event *application.CustomEvent) {})
 			}
 			processor.Off("test-event")
+			processor.Close()
 		}
 	})
 }
@@ -131,6 +138,7 @@ func BenchmarkHookExecution(b *testing.B) {
 		b.Run(fmt.Sprintf("Hooks%d", count), func(b *testing.B) {
 			dispatcher := &mockWindowDispatcher{}
 			processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
+			defer processor.Close()
 
 			// Register hooks
 			for i := 0; i < count; i++ {
@@ -161,6 +169,7 @@ func BenchmarkConcurrentEmit(b *testing.B) {
 		b.Run(fmt.Sprintf("Goroutines%d", concurrency), func(b *testing.B) {
 			dispatcher := &mockWindowDispatcher{}
 			processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
+			defer processor.Close()
 
 			// Register a few listeners
 			for i := 0; i < 5; i++ {
@@ -264,7 +273,8 @@ func BenchmarkAtomicCancel(b *testing.B) {
 func BenchmarkEventProcessorCreation(b *testing.B) {
 	dispatcher := &mockWindowDispatcher{}
 	for b.Loop() {
-		_ = application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
+		processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
+		processor.Close()
 	}
 }
 
@@ -282,6 +292,7 @@ func BenchmarkOnceEvent(b *testing.B) {
 			})
 			_ = processor.Emit(&application.CustomEvent{Name: "once-event", Data: nil})
 			wg.Wait()
+			processor.Close()
 		}
 	})
 }
@@ -302,6 +313,7 @@ func BenchmarkOnMultipleEvent(b *testing.B) {
 				_ = processor.Emit(&application.CustomEvent{Name: "multi-event", Data: nil})
 			}
 			wg.Wait()
+			processor.Close()
 		}
 	})
 }
@@ -312,6 +324,7 @@ func BenchmarkMixedEventOperations(b *testing.B) {
 
 	b.Run("RegisterEmitUnregister", func(b *testing.B) {
 		processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
+		defer processor.Close()
 
 		for b.Loop() {
 			cancel := processor.On("mixed-event", func(event *application.CustomEvent) {
@@ -324,6 +337,7 @@ func BenchmarkMixedEventOperations(b *testing.B) {
 
 	b.Run("HookAndEmit", func(b *testing.B) {
 		processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
+		defer processor.Close()
 		processor.RegisterHook("hooked-event", func(event *application.CustomEvent) {
 			// Validation hook
 			if event.Data == nil {
@@ -347,6 +361,7 @@ func BenchmarkMixedEventOperations(b *testing.B) {
 func BenchmarkEventNameLookup(b *testing.B) {
 	dispatcher := &mockWindowDispatcher{}
 	processor := application.NewWailsEventProcessor(dispatcher.dispatchEventToWindows)
+	defer processor.Close()
 
 	// Register events with different name lengths
 	shortName := "evt"

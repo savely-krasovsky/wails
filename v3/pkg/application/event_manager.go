@@ -3,6 +3,7 @@ package application
 import (
 	"slices"
 
+	"github.com/wailsapp/wails/v3/internal/mailbox"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
@@ -86,6 +87,10 @@ func (em *EventManager) OnApplicationEvent(eventType events.ApplicationEventType
 	listener := &EventListener{
 		callback: callback,
 	}
+	listener.events = mailbox.New(func(event *ApplicationEvent) {
+		defer handlePanic()
+		listener.callback(event)
+	})
 	em.app.applicationEventListeners[eventID] = append(em.app.applicationEventListeners[eventID], listener)
 	if em.app.impl != nil {
 		go func() {
@@ -95,13 +100,12 @@ func (em *EventManager) OnApplicationEvent(eventType events.ApplicationEventType
 	}
 
 	return func() {
-		// lock the map
 		em.app.applicationEventListenersLock.Lock()
-		defer em.app.applicationEventListenersLock.Unlock()
-		// Remove listener
 		em.app.applicationEventListeners[eventID] = slices.DeleteFunc(em.app.applicationEventListeners[eventID], func(l *EventListener) bool {
 			return l == listener
 		})
+		em.app.applicationEventListenersLock.Unlock()
+		listener.events.Close()
 	}
 }
 
@@ -132,43 +136,31 @@ func (em *EventManager) dispatch(event *CustomEvent) {
 	em.app.wailsEventListenerLock.Unlock()
 
 	for _, listener := range listeners {
-		if event.IsCancelled() {
-			return
-		}
-		listener.DispatchWailsEvent(event)
+		listener.events.Send(event)
 	}
 }
 
 // HandleApplicationEvent handles application events (internal use)
 func (em *EventManager) handleApplicationEvent(event *ApplicationEvent) {
 	defer handlePanic()
-	em.app.applicationEventListenersLock.RLock()
-	listeners, ok := em.app.applicationEventListeners[event.Id]
-	em.app.applicationEventListenersLock.RUnlock()
-	if !ok {
-		return
-	}
-
 	// Process Hooks
 	em.app.applicationEventHooksLock.RLock()
-	hooks, ok := em.app.applicationEventHooks[event.Id]
+	hooks := slices.Clone(em.app.applicationEventHooks[event.Id])
 	em.app.applicationEventHooksLock.RUnlock()
-	if ok {
-		for _, thisHook := range hooks {
-			thisHook.callback(event)
-			if event.IsCancelled() {
-				return
-			}
+	for _, thisHook := range hooks {
+		thisHook.callback(event)
+		if event.IsCancelled() {
+			return
 		}
 	}
 
-	for _, listener := range listeners {
-		go func() {
-			if event.IsCancelled() {
-				return
-			}
-			defer handlePanic()
-			listener.callback(event)
-		}()
+	em.app.applicationEventListenersLock.RLock()
+	for _, listener := range em.app.applicationEventListeners[event.Id] {
+		listener.events.Send(event)
 	}
+	em.app.applicationEventListenersLock.RUnlock()
+	em.dispatch(&CustomEvent{
+		Name: events.JSEvent(event.Id),
+		Data: event.Context().Data(),
+	})
 }

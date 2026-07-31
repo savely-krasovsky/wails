@@ -602,7 +602,7 @@ func processApplicationEvent(eventID C.uint, data pointer) {
 		isDark := globalApplication.Env.IsDarkMode()
 		event.Context().setIsDarkMode(isDark)
 	}
-	applicationEvents <- event
+	dispatchApplicationEvent(event)
 }
 
 func isOnMainThread() bool {
@@ -1722,10 +1722,10 @@ func (w *linuxWebviewWindow) setURL(uri string) {
 func emit(we *C.WindowEvent) {
 	window, _ := globalApplication.Window.GetByID(uint(we.id))
 	if window != nil {
-		windowEvents <- &windowEvent{
+		dispatchWindowEventToApp(&windowEvent{
 			WindowID: window.ID(),
 			EventID:  uint(events.WindowEventType(we.event)),
-		}
+		})
 	}
 }
 

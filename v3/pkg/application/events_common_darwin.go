@@ -16,10 +16,10 @@ func (m *macosApp) setupCommonEvents() {
 		sourceEvent := sourceEvent
 		targetEvent := targetEvent
 		m.parent.Event.OnApplicationEvent(sourceEvent, func(event *ApplicationEvent) {
-			applicationEvents <- &ApplicationEvent{
+			dispatchApplicationEvent(&ApplicationEvent{
 				Id:  uint(targetEvent),
 				ctx: event.ctx,
-			}
+			})
 		})
 	}
 

@@ -19,6 +19,7 @@ import (
 	"github.com/wailsapp/wails/v3/internal/assetserver/bundledassets"
 	"github.com/wailsapp/wails/v3/internal/assetserver/webview"
 	"github.com/wailsapp/wails/v3/internal/capabilities"
+	"github.com/wailsapp/wails/v3/internal/mailbox"
 	"github.com/wailsapp/wails/v3/pkg/updater"
 )
 
@@ -34,6 +35,7 @@ var AlphaAssets = AssetOptions{
 
 type EventListener struct {
 	callback func(app *ApplicationEvent)
+	events   *mailbox.Mailbox[*ApplicationEvent]
 }
 
 func Get() *App {
@@ -95,10 +97,10 @@ func New(appOptions Options) *App {
 
 	// Auto-wire events if transport supports event delivery
 	if eventTransport, ok := transport.(WailsEventListener); ok {
-		result.wailsEventListeners = append(result.wailsEventListeners, eventTransport)
+		result.addWailsEventListener(eventTransport)
 	} else {
 		// otherwise fallback to IPC
-		result.wailsEventListeners = append(result.wailsEventListeners, &EventIPCTransport{
+		result.addWailsEventListener(&EventIPCTransport{
 			app: result,
 		})
 	}
@@ -392,6 +394,7 @@ type App struct {
 
 	clipboard            *Clipboard
 	customEventProcessor *EventProcessor
+	applicationEvents    *mailbox.Mailbox[*ApplicationEvent]
 	Logger               *slog.Logger
 
 	contextMenus     map[string]*ContextMenu
@@ -427,7 +430,7 @@ type App struct {
 
 	// Wails ApplicationEvent Listener related
 	wailsEventListenerLock sync.Mutex
-	wailsEventListeners    []WailsEventListener
+	wailsEventListeners    []*wailsEventConsumer
 
 	// singleInstanceManager handles single instance functionality
 	singleInstanceManager *singleInstanceManager
@@ -499,7 +502,7 @@ func (a *App) init() {
 	a.keyBindings = make(map[string]func(window Window))
 	a.Logger = a.options.Logger
 	a.pid = os.Getpid()
-	a.wailsEventListeners = make([]WailsEventListener, 0)
+	a.wailsEventListeners = make([]*wailsEventConsumer, 0)
 
 	// Initialize managers
 	a.Window = newWindowManager(a)
@@ -516,6 +519,21 @@ func (a *App) init() {
 	a.Autostart = newAutostartManager(a)
 	a.GlobalShortcut = newGlobalShortcutManager(a)
 	a.Updater = updater.New(newUpdaterHost(a))
+	a.applicationEvents = mailbox.New(a.Event.handleApplicationEvent)
+}
+
+func (a *App) addWailsEventListener(listener WailsEventListener) {
+	a.wailsEventListenerLock.Lock()
+	a.wailsEventListeners = append(a.wailsEventListeners, newWailsEventConsumer(listener))
+	a.wailsEventListenerLock.Unlock()
+}
+
+func dispatchApplicationEvent(event *ApplicationEvent) {
+	globalApplication.applicationEvents.Send(event)
+}
+
+func dispatchWindowEventToApp(event *windowEvent) {
+	globalApplication.handleWindowEvent(event)
 }
 
 func (a *App) Capabilities() capabilities.Capabilities {
@@ -602,26 +620,13 @@ func (a *App) Run() error {
 			a.options.Services = services[:i+1]
 		}
 
+		// Start the MCP server when the application is built with -tags mcp.
+		// All configuration is read from environment variables (WAILS_MCP_HOST,
+		// WAILS_MCP_PORT, WAILS_MCP_TIMEOUT, WAILS_MCP_HIDE_CURSOR).
+		if err := startMCPServer(a); err != nil {
+			return fmt.Errorf("mcp: %w", err)
+		}
 
-	// Start the MCP server when the application is built with -tags mcp.
-	// All configuration is read from environment variables (WAILS_MCP_HOST,
-	// WAILS_MCP_PORT, WAILS_MCP_TIMEOUT, WAILS_MCP_HIDE_CURSOR).
-	if err := startMCPServer(a); err != nil {
-		return fmt.Errorf("mcp: %w", err)
-	}
-
-		go func() {
-			for {
-				event := <-applicationEvents
-				go a.Event.handleApplicationEvent(event)
-			}
-		}()
-		go func() {
-			for {
-				event := <-windowEvents
-				go a.handleWindowEvent(event)
-			}
-		}()
 		go func() {
 			for {
 				request := <-webviewRequests
@@ -802,6 +807,9 @@ func (a *App) handleWindowEvent(event *windowEvent) {
 		a.warning("Window #%d not found", event.WindowID)
 		return
 	}
+	if webview, ok := window.(*WebviewWindow); ok && isWindowNavigationStart(event.EventID) {
+		webview.frontendEvents.markNotReady()
+	}
 	window.HandleWindowEvent(event.EventID)
 }
 
@@ -832,6 +840,24 @@ func (a *App) cleanup() {
 	a.cancel() // Cancel app context before running shutdown hooks.
 	a.performingShutdown = true
 	a.shutdownLock.Unlock()
+	a.applicationEvents.Stop()
+	a.applicationEventListenersLock.Lock()
+	applicationListeners := a.applicationEventListeners
+	a.applicationEventListeners = make(map[uint][]*EventListener)
+	a.applicationEventListenersLock.Unlock()
+	for _, listeners := range applicationListeners {
+		for _, listener := range listeners {
+			listener.events.Stop()
+		}
+	}
+	a.customEventProcessor.Close()
+	a.wailsEventListenerLock.Lock()
+	transports := a.wailsEventListeners
+	a.wailsEventListeners = nil
+	a.wailsEventListenerLock.Unlock()
+	for _, transport := range transports {
+		transport.events.Stop()
+	}
 
 	// No need to hold the lock here because a.shutdownTasks
 	// may only change while a.performingShutdown is false.

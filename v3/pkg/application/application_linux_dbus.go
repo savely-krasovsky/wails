@@ -64,7 +64,7 @@ func (a *linuxApp) monitorThemeChanges() {
 				a.theme = theme
 				event := newApplicationEvent(events.Linux.SystemThemeChanged)
 				event.Context().setIsDarkMode(a.isDarkMode())
-				applicationEvents <- event
+				dispatchApplicationEvent(event)
 			}
 
 		}
@@ -144,9 +144,9 @@ func (a *linuxApp) monitorPowerEvents() {
 				continue
 			}
 			if willSleep {
-				applicationEvents <- newApplicationEvent(events.Linux.SystemWillSleep)
+				dispatchApplicationEvent(newApplicationEvent(events.Linux.SystemWillSleep))
 			} else {
-				applicationEvents <- newApplicationEvent(events.Linux.SystemDidWake)
+				dispatchApplicationEvent(newApplicationEvent(events.Linux.SystemDidWake))
 			}
 		}
 	}()

@@ -64,7 +64,7 @@ func (a *App) platformRun() {
 	globalApp = a
 	globalAppLock.Unlock()
 
-	applicationEvents <- newApplicationEvent(events.Android.ActivityCreated)
+	dispatchApplicationEvent(newApplicationEvent(events.Android.ActivityCreated))
 
 	// Block forever - Android manages the app lifecycle via JNI callbacks
 	select {}

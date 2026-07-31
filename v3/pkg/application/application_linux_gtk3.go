@@ -146,10 +146,10 @@ func (a *linuxApp) run() error {
 			a.parent.debug("Application launched with argument, potentially a URL from custom protocol", "url", arg1)
 			eventContext := newApplicationEventContext()
 			eventContext.setURL(arg1)
-			applicationEvents <- &ApplicationEvent{
+			dispatchApplicationEvent(&ApplicationEvent{
 				Id:  uint(events.Common.ApplicationLaunchedWithUrl),
 				ctx: eventContext,
-			}
+			})
 		} else {
 			// Check if the argument matches any file associations
 			matched := false
@@ -159,10 +159,10 @@ func (a *linuxApp) run() error {
 					a.parent.debug("File opened via file association", "file", arg1, "extension", ext)
 					eventContext := newApplicationEventContext()
 					eventContext.setOpenedWithFile(arg1)
-					applicationEvents <- &ApplicationEvent{
+					dispatchApplicationEvent(&ApplicationEvent{
 						Id:  uint(events.Common.ApplicationOpenedWithFile),
 						ctx: eventContext,
-					}
+					})
 					matched = true
 				}
 			}
@@ -258,10 +258,10 @@ func (a *App) logPlatformInfo() {
 
 //export processWindowEvent
 func processWindowEvent(windowID C.uint, eventID C.uint) {
-	windowEvents <- &windowEvent{
+	dispatchWindowEventToApp(&windowEvent{
 		WindowID: uint(windowID),
 		EventID:  uint(eventID),
-	}
+	})
 }
 
 func buildVersionString(major, minor, micro C.uint) string {

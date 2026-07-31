@@ -437,6 +437,16 @@ v3/internal/assetserver/webview/
 
 ## Changelog
 
+### 2026-07-31
+- Routed GTK4 and legacy GTK3 application/window event entrypoints into the
+  shared V3 serial event streams instead of package-level channels.
+- Runtime-ready and load-start events now participate in per-window FIFO
+  delivery and reload readiness handling on both Linux stacks.
+- Files: `v3/pkg/application/linux_cgo.go`,
+  `v3/pkg/application/linux_cgo_gtk3.go`,
+  `v3/pkg/application/application_linux_dbus.go`, and
+  `v3/pkg/application/application_linux_gtk3.go`.
+
 ### 2026-07-26
 - Fixed GTK4 `Size()` returning the requested default instead of the live configured window size.
 - Added GTK4 `GdkSurface` resize and toplevel-state notifications, including common maximise, minimise, and fullscreen events.

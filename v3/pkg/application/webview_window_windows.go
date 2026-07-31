@@ -22,9 +22,9 @@ import (
 	"github.com/wailsapp/wails/v3/internal/sliceutil"
 	"github.com/wailsapp/wails/v3/internal/webview2/webviewloader"
 
+	"github.com/wailsapp/wails/v3/internal/webview2/pkg/edge"
 	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wailsapp/wails/v3/pkg/w32"
-	"github.com/wailsapp/wails/v3/internal/webview2/pkg/edge"
 )
 
 var edgeMap = map[string]uintptr{
@@ -2644,6 +2644,7 @@ func (w *windowsWebviewWindow) flash(enabled bool) {
 }
 
 func (w *windowsWebviewWindow) navigationStarting(_ *edge.ICoreWebView2) {
+	w.parent.frontendEvents.markNotReady()
 	w.setNonClientHitTestRegions(nil)
 }
 
@@ -2663,7 +2664,7 @@ func (w *windowsWebviewWindow) navigationCompleted(
 	w.execJS(js)
 
 	// EmitEvent DomReady ApplicationEvent
-	windowEvents <- &windowEvent{EventID: uint(events.Windows.WebViewNavigationCompleted), WindowID: w.parent.id}
+	dispatchWindowEventToApp(&windowEvent{EventID: uint(events.Windows.WebViewNavigationCompleted), WindowID: w.parent.id})
 
 	if w.webviewNavigationCompleted {
 		// NavigationCompleted is triggered for every Load. If an application uses reloads the Hide/Show will trigger

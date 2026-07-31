@@ -382,15 +382,15 @@ func processApplicationEvent(eventID C.uint, data unsafe.Pointer) {
 		isDark := globalApplication.Env.IsDarkMode()
 		event.Context().setIsDarkMode(isDark)
 	}
-	applicationEvents <- event
+	dispatchApplicationEvent(event)
 }
 
 //export processWindowEvent
 func processWindowEvent(windowID C.uint, eventID C.uint) {
-	windowEvents <- &windowEvent{
+	dispatchWindowEventToApp(&windowEvent{
 		WindowID: uint(windowID),
 		EventID:  uint(eventID),
-	}
+	})
 }
 
 //export processMessage
@@ -754,10 +754,10 @@ func HandleOpenFile(filePath *C.char) {
 	eventContext := newApplicationEventContext()
 	eventContext.setOpenedWithFile(goFilepath)
 	// EmitEvent application started event
-	applicationEvents <- &ApplicationEvent{
+	dispatchApplicationEvent(&ApplicationEvent{
 		Id:  uint(events.Common.ApplicationOpenedWithFile),
 		ctx: eventContext,
-	}
+	})
 }
 
 //export HandleOpenURL
@@ -767,8 +767,8 @@ func HandleOpenURL(urlCString *C.char) {
 	eventContext.setURL(urlString)
 
 	// Emit the standard event with the URL string as data
-	applicationEvents <- &ApplicationEvent{
+	dispatchApplicationEvent(&ApplicationEvent{
 		Id:  uint(events.Common.ApplicationLaunchedWithUrl),
 		ctx: eventContext,
-	}
+	})
 }

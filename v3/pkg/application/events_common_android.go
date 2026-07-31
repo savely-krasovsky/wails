@@ -24,10 +24,10 @@ func (a *androidApp) setupCommonEvents() {
 		targetEvent := targetEvent
 		a.parent.Event.OnApplicationEvent(sourceEvent, func(event *ApplicationEvent) {
 			androidDebugLogf("[events_common_android.go] forwarding android event %d → common %d", sourceEvent, targetEvent)
-			applicationEvents <- &ApplicationEvent{
+			dispatchApplicationEvent(&ApplicationEvent{
 				Id:  uint(targetEvent),
 				ctx: event.ctx,
-			}
+			})
 		})
 	}
 }

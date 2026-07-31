@@ -213,7 +213,7 @@ func (a *iosApp) run() error {
 		C.ios_start_system_event_monitors()
 
 		// Emit the launch event now that listeners are wired and UIKit is up.
-		applicationEvents <- newApplicationEvent(events.IOS.ApplicationDidFinishLaunching)
+		dispatchApplicationEvent(newApplicationEvent(events.IOS.ApplicationDidFinishLaunching))
 	}()
 
 	// Hand the main thread to UIKit. platformRun calls UIApplicationMain and does
@@ -388,7 +388,6 @@ func HandleJSMessage(windowID C.uint, message *C.char) {
 	}
 }
 
-// Note: applicationEvents and windowEvents are already defined in events.go
 // We'll use those existing channels
 
 type iosWindowEvent struct {
@@ -415,17 +414,16 @@ func processApplicationEvent(eventID C.uint, data unsafe.Pointer) {
 		}
 	}
 
-	// Send to the applicationEvents channel for processing
-	applicationEvents <- event
+	dispatchApplicationEvent(event)
 }
 
 //export processWindowEvent
 func processWindowEvent(windowID C.uint, eventID C.uint) {
 	iosDebugLogf("[application_ios.go] window event: window %d, event %d", windowID, eventID)
-	windowEvents <- &windowEvent{
+	dispatchWindowEventToApp(&windowEvent{
 		WindowID: uint(windowID),
 		EventID:  uint(eventID),
-	}
+	})
 }
 
 // iosEventListeners records which native event IDs have at least one Go-side
